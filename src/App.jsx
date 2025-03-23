@@ -5,7 +5,7 @@ import { Chessboard } from 'react-chessboard';
 import SimplePeer from 'simple-peer';
 import './App.css';
 
-const socket = io('http://localhost:3000', {
+const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
 });
 
