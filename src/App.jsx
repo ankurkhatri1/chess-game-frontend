@@ -18,7 +18,8 @@ const isWebRTCSupported = () => {
   return !!(window.RTCPeerConnection && window.RTCIceCandidate && window.RTCSessionDescription);
 };
 
-function Game() {
+function Game({ challengeLink, setChallengeLink, setShowLinkOptions }) {
+  const queuedSignals = useRef([]);
   const [game, setGame] = useState(new Chess());
   const [position, setPosition] = useState('start');
   const localAudioRef = useRef(null);
@@ -94,6 +95,9 @@ function Game() {
     socket.on('error', (err) => {
       console.error('Socket error:', err);
       setError(err);
+      if (err === 'Challenge not found!') {
+        navigate('/');
+      }
     });
 
     return () => {
@@ -106,7 +110,7 @@ function Game() {
       socket.off('turn');
       socket.off('error');
     };
-  }, [challengeId]);
+  }, [challengeId, navigate]);
 
   useEffect(() => {
     if (!role || !isConnected || !socketConnected || !webRTCSupported) return;
@@ -188,8 +192,11 @@ function Game() {
 
         socket.on('signal', ({ data, from }) => {
           console.log('Received signal from', from, ':', data.type || 'candidate');
-          if (peerInstance && !peerInstance.destroyed) {
-            peerInstance.signal(data);
+          if (!peerRef.current || peerRef.current.destroyed) {
+            queuedSignals.current.push(data);
+            console.log('Signal queued:', data);
+          } else {
+            peerRef.current.signal(data);
           }
         });
       } catch (err) {
@@ -204,13 +211,27 @@ function Game() {
       console.log('Cleaning up WebRTC...');
       if (peerInstance) {
         peerInstance.destroy();
+        peerRef.current = null;
       }
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop());
       }
       socket.off('signal');
+      queuedSignals.current = [];
     };
   }, [role, isConnected, socketConnected, webRTCSupported, challengeId]);
+
+  useEffect(() => {
+    if (peerRef.current && queuedSignals.current.length > 0) {
+      console.log('Processing queued signals:', queuedSignals.current);
+      queuedSignals.current.forEach(signal => {
+        if (peerRef.current && !peerRef.current.destroyed) {
+          peerRef.current.signal(signal);
+        }
+      });
+      queuedSignals.current = [];
+    }
+  }, [peerRef.current]);
 
   const onDrop = (sourceSquare, targetSquare) => {
     if (color !== currentTurn) {
@@ -242,6 +263,33 @@ function Game() {
       {error && <p style={{ color: 'red' }}>{error}</p>}
       {!socketConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
       {!webRTCSupported && <p style={{ color: 'red' }}>WebRTC not supported! Audio call unavailable.</p>}
+      {/* Hide challenge link, buttons, and text when game starts (isConnected is true) */}
+      {!isConnected && challengeLink && (
+        <div style={{ marginBottom: '20px' }}>
+          <p>Challenge Link: <a href={challengeLink} onClick={(e) => e.preventDefault()}>{challengeLink}</a></p>
+          <button onClick={(e) => {
+            e.preventDefault();
+            navigator.clipboard.writeText(challengeLink).then(() => alert('Challenge link copied to clipboard!'));
+          }} style={{ padding: '5px 10px', marginRight: '10px' }}>
+            Copy Link
+          </button>
+          <button onClick={(e) => {
+            e.preventDefault();
+            if (navigator.share) {
+              navigator.share({
+                title: 'Chess Challenge',
+                text: 'Join me for a chess game with voice call!',
+                url: challengeLink,
+              });
+            } else {
+              setError('Share API not supported in this browser.');
+            }
+          }} style={{ padding: '5px 10px' }}>
+            Share Link
+          </button>
+          <p>Share this link with your opponent!</p>
+        </div>
+      )}
       <div className="game-container">
         <Chessboard
           position={position}
@@ -267,16 +315,19 @@ function Game() {
         {role && `TU ${role.toUpperCase()} HAI, COLOR: ${color?.toUpperCase()}`} <br />
         {isConnected ? `CONNECTED! AB ${currentTurn.toUpperCase()} KI BAARI!` : 'DUSHMAN KA WAIT KAR...'}
       </div>
-      <button onClick={() => navigate('/')} style={{ marginTop: '20px' }}>
+      <button onClick={() => {
+        setChallengeLink('');
+        setShowLinkOptions(false);
+        navigate('/');
+      }} style={{ marginTop: '20px' }}>
         Back to Home
       </button>
     </div>
   );
 }
 
-function Home() {
+function Home({ setChallengeLink, setShowLinkOptions }) {
   const navigate = useNavigate();
-  const [challengeLink, setChallengeLink] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
   const [error, setError] = useState('');
 
@@ -298,48 +349,33 @@ function Home() {
       setError(err);
     });
 
+    socket.on('role', ({ role, color }) => {
+      console.log(`Assigned role in Home: ${role}, color: ${color}`);
+      setShowLinkOptions(true);
+    });
+
     return () => {
       socket.off('connect');
       socket.off('connect_error');
       socket.off('error');
+      socket.off('role');
     };
-  }, []);
+  }, [setShowLinkOptions]);
 
-  const createChallenge = () => {
+  const createChallenge = (e) => {
+    e.preventDefault();
     if (!socketConnected) {
       setError('Cannot create challenge: Not connected to server!');
       return;
     }
 
     const challengeId = uuidv4();
+    console.log('Creating challenge:', challengeId);
     socket.emit('create-challenge', challengeId);
     const link = `${window.location.origin}/challenge/${challengeId}`;
     setChallengeLink(link);
-    navigate(`/challenge/${challengeId}`);
-  };
-
-  const copyLink = () => {
-    navigator.clipboard.writeText(challengeLink).then(() => {
-      alert('Challenge link copied to clipboard!');
-    }).catch((err) => {
-      console.error('Failed to copy link:', err);
-      setError('Failed to copy link: ' + err.message);
-    });
-  };
-
-  const shareLink = () => {
-    if (navigator.share) {
-      navigator.share({
-        title: 'Chess Challenge',
-        text: 'Join me for a chess game with voice call!',
-        url: challengeLink,
-      }).catch((err) => {
-        console.error('Failed to share link:', err);
-        setError('Failed to share link: ' + err.message);
-      });
-    } else {
-      setError('Share API not supported in this browser. Use the copy button instead.');
-    }
+    setShowLinkOptions(true);
+    navigate(`/challenge/${challengeId}`, { replace: true });
   };
 
   return (
@@ -350,29 +386,22 @@ function Home() {
       <button onClick={createChallenge} style={{ padding: '10px 20px', fontSize: '16px' }} disabled={!socketConnected}>
         Create Challenge
       </button>
-      {challengeLink && (
-        <div style={{ marginTop: '20px' }}>
-          <p>Challenge Link: <a href={challengeLink}>{challengeLink}</a></p>
-          <button onClick={copyLink} style={{ padding: '5px 10px', marginRight: '10px' }}>
-            Copy Link
-          </button>
-          <button onClick={shareLink} style={{ padding: '5px 10px' }}>
-            Share Link
-          </button>
-        </div>
-      )}
     </div>
   );
 }
 
 function App() {
+  const [challengeLink, setChallengeLink] = useState('');
+  const [showLinkOptions, setShowLinkOptions] = useState(false);
+
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/challenge/:challengeId" element={<Game />} />
+        <Route path="/" element={<Home setChallengeLink={setChallengeLink} setShowLinkOptions={setShowLinkOptions} />} />
+        <Route path="/challenge/:challengeId" element={<Game challengeLink={challengeLink} setChallengeLink={setChallengeLink} setShowLinkOptions={setShowLinkOptions} />} />
       </Routes>
     </Router>
   );
 }
+
 export default App;
