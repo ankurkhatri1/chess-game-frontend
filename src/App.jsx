@@ -7,11 +7,14 @@ import { BrowserRouter as Router, Route, Routes, useNavigate, useParams } from '
 import { v4 as uuidv4 } from 'uuid';
 import './App.css';
 
+// Socket connection with additional options for production
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
   reconnection: true,
   reconnectionAttempts: 15,
   reconnectionDelay: 1000,
+  path: '/socket.io', // Ensure correct path for production
+  withCredentials: true, // Handle CORS in production
 });
 
 const isWebRTCSupported = () => {
@@ -263,7 +266,6 @@ function Game({ challengeLink, setChallengeLink, setShowLinkOptions }) {
       {error && <p style={{ color: 'red' }}>{error}</p>}
       {!socketConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
       {!webRTCSupported && <p style={{ color: 'red' }}>WebRTC not supported! Audio call unavailable.</p>}
-      {/* Hide challenge link, buttons, and text when game starts (isConnected is true) */}
       {!isConnected && challengeLink && (
         <div style={{ marginBottom: '20px' }}>
           <p>Challenge Link: <a href={challengeLink} onClick={(e) => e.preventDefault()}>{challengeLink}</a></p>
