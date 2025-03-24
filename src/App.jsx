@@ -31,7 +31,7 @@ function Game() {
   const [error, setError] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
   const [webRTCSupported, setWebRTCSupported] = useState(true);
-  const { challengeId } = useParams(); // Extract challenge ID from URL
+  const { challengeId } = useParams();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -45,14 +45,16 @@ function Game() {
     socket.on('connect', () => {
       console.log('Socket connected:', socket.id);
       setSocketConnected(true);
+      setError('');
       if (challengeId) {
+        console.log('Joining challenge:', challengeId);
         socket.emit('join-challenge', challengeId);
       }
     });
 
     socket.on('connect_error', (err) => {
       console.error('Socket connect error:', err);
-      setError('Socket connection failed: ' + err.message);
+      setError(`Socket connection failed: ${err.message}. Check if backend is running at ${import.meta.env.VITE_SOCKET_URL}`);
       setSocketConnected(false);
     });
 
@@ -60,9 +62,11 @@ function Game() {
       console.log('Socket disconnected');
       setSocketConnected(false);
       setIsConnected(false);
+      setError('Disconnected from server. Please refresh the page.');
     });
 
     socket.on('move', ({ san, fen }) => {
+      console.log('Received move:', san);
       const newGame = new Chess(fen);
       setGame(newGame);
       setPosition(fen);
@@ -273,8 +277,40 @@ function Game() {
 function Home() {
   const navigate = useNavigate();
   const [challengeLink, setChallengeLink] = useState('');
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    socket.on('connect', () => {
+      console.log('Socket connected:', socket.id);
+      setSocketConnected(true);
+      setError('');
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('Socket connect error:', err);
+      setError(`Socket connection failed: ${err.message}. Check if backend is running at ${import.meta.env.VITE_SOCKET_URL}`);
+      setSocketConnected(false);
+    });
+
+    socket.on('error', (err) => {
+      console.error('Socket error:', err);
+      setError(err);
+    });
+
+    return () => {
+      socket.off('connect');
+      socket.off('connect_error');
+      socket.off('error');
+    };
+  }, []);
 
   const createChallenge = () => {
+    if (!socketConnected) {
+      setError('Cannot create challenge: Not connected to server!');
+      return;
+    }
+
     const challengeId = uuidv4();
     socket.emit('create-challenge', challengeId);
     const link = `${window.location.origin}/challenge/${challengeId}`;
@@ -282,16 +318,47 @@ function Home() {
     navigate(`/challenge/${challengeId}`);
   };
 
+  const copyLink = () => {
+    navigator.clipboard.writeText(challengeLink).then(() => {
+      alert('Challenge link copied to clipboard!');
+    }).catch((err) => {
+      console.error('Failed to copy link:', err);
+      setError('Failed to copy link: ' + err.message);
+    });
+  };
+
+  const shareLink = () => {
+    if (navigator.share) {
+      navigator.share({
+        title: 'Chess Challenge',
+        text: 'Join me for a chess game with voice call!',
+        url: challengeLink,
+      }).catch((err) => {
+        console.error('Failed to share link:', err);
+        setError('Failed to share link: ' + err.message);
+      });
+    } else {
+      setError('Share API not supported in this browser. Use the copy button instead.');
+    }
+  };
+
   return (
     <div className="App">
       <h1>CHESS WITH VOICE CALL</h1>
-      <button onClick={createChallenge} style={{ padding: '10px 20px', fontSize: '16px' }}>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {!socketConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
+      <button onClick={createChallenge} style={{ padding: '10px 20px', fontSize: '16px' }} disabled={!socketConnected}>
         Create Challenge
       </button>
       {challengeLink && (
         <div style={{ marginTop: '20px' }}>
           <p>Challenge Link: <a href={challengeLink}>{challengeLink}</a></p>
-          <p>Share this link with your opponent!</p>
+          <button onClick={copyLink} style={{ padding: '5px 10px', marginRight: '10px' }}>
+            Copy Link
+          </button>
+          <button onClick={shareLink} style={{ padding: '5px 10px' }}>
+            Share Link
+          </button>
         </div>
       )}
     </div>
@@ -308,5 +375,4 @@ function App() {
     </Router>
   );
 }
-
 export default App;
