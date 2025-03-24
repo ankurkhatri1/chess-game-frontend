@@ -2,34 +2,56 @@ import { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
-import SimplePeer from 'simple-peer';
+import Peer from 'peerjs';
 import './App.css';
 
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionAttempts: 15,
+  reconnectionDelay: 1000,
 });
 
 function App() {
   const [game, setGame] = useState(new Chess());
   const [position, setPosition] = useState('start');
-  const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
+  const localAudioRef = useRef(null);
+  const remoteAudioRef = useRef(null);
   const peerRef = useRef(null);
   const [role, setRole] = useState(null);
   const [color, setColor] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [currentTurn, setCurrentTurn] = useState('white');
+  const [error, setError] = useState('');
+  const [socketConnected, setSocketConnected] = useState(false);
 
-  // Chess Logic
+  // Socket Connection Handling
   useEffect(() => {
+    socket.on('connect', () => {
+      console.log('Socket connected:', socket.id);
+      setSocketConnected(true);
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('Socket connect error:', err);
+      setError('Socket connection failed: ' + err.message);
+      setSocketConnected(false);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Socket disconnected');
+      setSocketConnected(false);
+      setIsConnected(false);
+    });
+
     socket.on('move', ({ san, fen }) => {
-      const newGame = new Chess(fen); // Update local game state from server
+      const newGame = new Chess(fen);
       setGame(newGame);
       setPosition(fen);
     });
 
-    socket.on('role', ({ role, color }) => {
-      console.log(`Assigned role: ${role}, color: ${color}`);
+    socket.on('role', ({ role, color, peerId }) => {
+      console.log(`Assigned role: ${role}, color: ${color}, peerId: ${peerId}`);
       setRole(role);
       setColor(color);
     });
@@ -49,10 +71,13 @@ function App() {
 
     socket.on('error', (err) => {
       console.error('Socket error:', err);
-      alert(err);
+      setError(err);
     });
 
     return () => {
+      socket.off('connect');
+      socket.off('connect_error');
+      socket.off('disconnect');
       socket.off('move');
       socket.off('role');
       socket.off('start');
@@ -61,41 +86,46 @@ function App() {
     };
   }, []);
 
-  // WebRTC Logic
+  // WebRTC Logic with PeerJS
   useEffect(() => {
-    if (!role || !isConnected) return;
+    if (!role || !isConnected || !socketConnected) return;
 
     let localStream;
     let peerInstance;
 
     const initPeer = async () => {
       try {
+        console.log('Initializing PeerJS...');
         localStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: false,
           audio: true,
         });
 
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStream;
-          localVideoRef.current.muted = true;
-          await localVideoRef.current.play();
+        if (localAudioRef.current) {
+          localAudioRef.current.srcObject = localStream;
+          localAudioRef.current.muted = true;
+          await localAudioRef.current.play();
+          console.log('Local audio stream set');
+        } else {
+          setError('Local audio element not found!');
+          console.error('Local audio ref is null');
+          return;
         }
 
-        peerInstance = new SimplePeer({
+        peerInstance = new Peer({
           initiator: role === 'initiator',
           trickle: true,
-          stream: localStream,
           config: {
             iceServers: [
               { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
-              {
-                urls: 'turn:numb.viagenie.ca',
-                username: 'webrtc@live.com',
-                credential: 'muazkh',
-              },
+              { urls: 'stun:global.stun.twilio.com:3478' },
               {
                 urls: 'turn:openrelay.metered.ca:80',
+                username: 'openrelayproject',
+                credential: 'openrelayproject',
+              },
+              {
+                urls: 'turn:openrelay.metered.ca:443',
                 username: 'openrelayproject',
                 credential: 'openrelayproject',
               },
@@ -103,53 +133,70 @@ function App() {
           },
         });
 
-        peerInstance.on('signal', (data) => {
-          console.log('SIGNAL:', data.type || 'candidate');
-          socket.emit('signal', data);
+        peerRef.current = peerInstance;
+
+        peerInstance.on('open', (id) => {
+          console.log('PeerJS ID:', id);
+          socket.emit('peer-id', { peerId: id, role });
         });
 
-        peerInstance.on('stream', (remoteStream) => {
-          console.log('GOT REMOTE STREAM');
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStream;
-            remoteVideoRef.current.play().catch((e) => console.log('Video play error:', e));
+        peerInstance.on('call', (call) => {
+          console.log('Receiving call...');
+          call.answer(localStream);
+          call.on('stream', (remoteStream) => {
+            console.log('Received remote audio stream');
+            if (remoteAudioRef.current) {
+              remoteAudioRef.current.srcObject = remoteStream;
+              remoteAudioRef.current.play().catch((e) => console.error('Remote audio play error:', e));
+            }
+          });
+        });
+
+        socket.on('peer-id', ({ peerId, role: remoteRole }) => {
+          if (role === 'initiator' && remoteRole === 'receiver') {
+            console.log('Calling receiver with Peer ID:', peerId);
+            const call = peerInstance.call(peerId, localStream);
+            call.on('stream', (remoteStream) => {
+              console.log('Received remote audio stream from receiver');
+              if (remoteAudioRef.current) {
+                remoteAudioRef.current.srcObject = remoteStream;
+                remoteAudioRef.current.play().catch((e) => console.error('Remote audio play error:', e));
+              }
+            });
+            call.on('error', (err) => {
+              console.error('Call error:', err);
+              setError('Call error: ' + err.message);
+            });
           }
         });
 
         peerInstance.on('error', (err) => {
-          console.error('PEER ERROR:', err);
+          console.error('Peer error:', err);
+          setError('Peer connection error: ' + err.message);
         });
 
-        peerInstance.on('connect', () => {
-          console.log('WEBRTC CONNECTED!');
-        });
-
-        peerRef.current = peerInstance;
-
-        socket.on('signal', (data) => {
-          console.log('RECEIVED SIGNAL:', data.type || 'candidate');
-          if (!peerInstance.destroyed) {
-            peerInstance.signal(data);
-          }
+        peerInstance.on('close', () => {
+          console.log('Peer connection closed');
         });
       } catch (err) {
         console.error('Media error:', err);
+        setError('Mic access denied or error: ' + err.message);
       }
     };
 
     initPeer();
 
     return () => {
+      console.log('Cleaning up PeerJS...');
       if (peerInstance) {
-        console.log('CLEANING UP PEER');
         peerInstance.destroy();
       }
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop());
       }
-      socket.off('signal');
+      socket.off('peer-id');
     };
-  }, [role, isConnected]);
+  }, [role, isConnected, socketConnected]);
 
   // Handle Chess Moves
   const onDrop = (sourceSquare, targetSquare) => {
@@ -158,7 +205,7 @@ function App() {
       return false;
     }
 
-    const newGame = new Chess(game.fen()); // Clone current game state
+    const newGame = new Chess(game.fen());
     const move = newGame.move({
       from: sourceSquare,
       to: targetSquare,
@@ -170,16 +217,17 @@ function App() {
       return false;
     }
 
-    // Locally update the board immediately
     setGame(newGame);
     setPosition(newGame.fen());
-    socket.emit('move', move.san); // Send move to server
+    socket.emit('move', move.san);
     return true;
   };
 
   return (
     <div className="App">
-      <h1>CHESS WITH VIDEO CALL, LADAI SHURU!</h1>
+      <h1>CHESS WITH VOICE CALL, LADAI SHURU!</h1>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {!socketConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
       <div className="game-container">
         <Chessboard
           position={position}
@@ -190,14 +238,14 @@ function App() {
             boxShadow: '0 2px 10px rgba(0, 0, 0, 0.5)',
           }}
         />
-        <div className="video-container">
-          <div className="video-box">
-            <video ref={localVideoRef} autoPlay playsInline className="video-self" />
-            <div className="video-label">TU ({color || 'Wait'})</div>
+        <div className="audio-container">
+          <div className="audio-box">
+            <audio ref={localAudioRef} autoPlay playsInline />
+            <div className="audio-label">TU ({color || 'Wait'})</div>
           </div>
-          <div className="video-box">
-            <video ref={remoteVideoRef} autoPlay playsInline className="video-peer" />
-            <div className="video-label">DUSHMAN</div>
+          <div className="audio-box">
+            <audio ref={remoteAudioRef} autoPlay playsInline />
+            <div className="audio-label">DUSHMAN</div>
           </div>
         </div>
       </div>
