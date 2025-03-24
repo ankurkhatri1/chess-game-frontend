@@ -7,14 +7,14 @@ import { BrowserRouter as Router, Route, Routes, useNavigate, useParams } from '
 import { v4 as uuidv4 } from 'uuid';
 import './App.css';
 
-// Socket connection with additional options for production
+// Socket connection with improved options for production
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
   reconnection: true,
-  reconnectionAttempts: 15,
-  reconnectionDelay: 1000,
-  path: '/socket.io', // Ensure correct path for production
-  withCredentials: true, // Handle CORS in production
+  reconnectionAttempts: 20, // Increased attempts
+  reconnectionDelay: 2000, // Increased delay for Render wake-up
+  path: '/socket.io',
+  withCredentials: true,
 });
 
 const isWebRTCSupported = () => {
@@ -58,7 +58,7 @@ function Game({ challengeLink, setChallengeLink, setShowLinkOptions }) {
 
     socket.on('connect_error', (err) => {
       console.error('Socket connect error:', err);
-      setError(`Socket connection failed: ${err.message}. Check if backend is running at ${import.meta.env.VITE_SOCKET_URL}`);
+      setError(`Socket connection failed: ${err.message}. Check if backend is running at ${import.meta.env.VITE_SOCKET_URL || 'unknown URL'}`);
       setSocketConnected(false);
     });
 
@@ -158,6 +158,12 @@ function Game({ challengeLink, setChallengeLink, setShowLinkOptions }) {
                 username: 'openrelayproject',
                 credential: 'openrelayproject',
               },
+              // Backup TURN server
+              {
+                urls: 'turn:turn.example.com:3478', // Replace with a reliable TURN server
+                username: 'testuser',
+                credential: 'testpass',
+              },
             ],
           },
         });
@@ -204,7 +210,7 @@ function Game({ challengeLink, setChallengeLink, setShowLinkOptions }) {
         });
       } catch (err) {
         console.error('Media error:', err);
-        setError('Mic access denied or error: ' + err.message);
+        setError('Mic access denied or error: Please allow microphone access to enable voice call.');
       }
     };
 
@@ -332,6 +338,7 @@ function Home({ setChallengeLink, setShowLinkOptions }) {
   const navigate = useNavigate();
   const [socketConnected, setSocketConnected] = useState(false);
   const [error, setError] = useState('');
+  const [roleAssigned, setRoleAssigned] = useState(false);
 
   useEffect(() => {
     socket.on('connect', () => {
@@ -342,7 +349,7 @@ function Home({ setChallengeLink, setShowLinkOptions }) {
 
     socket.on('connect_error', (err) => {
       console.error('Socket connect error:', err);
-      setError(`Socket connection failed: ${err.message}. Check if backend is running at ${import.meta.env.VITE_SOCKET_URL}`);
+      setError(`Socket connection failed: ${err.message}. Check if backend is running at ${import.meta.env.VITE_SOCKET_URL || 'unknown URL'}`);
       setSocketConnected(false);
     });
 
@@ -353,6 +360,7 @@ function Home({ setChallengeLink, setShowLinkOptions }) {
 
     socket.on('role', ({ role, color }) => {
       console.log(`Assigned role in Home: ${role}, color: ${color}`);
+      setRoleAssigned(true);
       setShowLinkOptions(true);
     });
 
@@ -374,10 +382,31 @@ function Home({ setChallengeLink, setShowLinkOptions }) {
     const challengeId = uuidv4();
     console.log('Creating challenge:', challengeId);
     socket.emit('create-challenge', challengeId);
-    const link = `${window.location.origin}/challenge/${challengeId}`;
-    setChallengeLink(link);
-    setShowLinkOptions(true);
-    navigate(`/challenge/${challengeId}`, { replace: true });
+
+    // Wait for role assignment before navigating
+    const waitForRole = new Promise((resolve) => {
+      socket.on('role', () => {
+        console.log('Role assigned, navigating to challenge:', challengeId);
+        resolve();
+      });
+    });
+
+    waitForRole.then(() => {
+      const link = `${window.location.origin}/challenge/${challengeId}`;
+      setChallengeLink(link);
+      setShowLinkOptions(true);
+      navigate(`/challenge/${challengeId}`, { replace: true });
+    }).catch((err) => {
+      console.error('Error waiting for role:', err);
+      setError('Failed to create challenge: Role assignment timed out.');
+    });
+
+    // Timeout for role assignment
+    setTimeout(() => {
+      if (!roleAssigned) {
+        setError('Failed to create challenge: Role assignment timed out.');
+      }
+    }, 10000); // 10 seconds timeout
   };
 
   return (
