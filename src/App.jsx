@@ -5,6 +5,11 @@ import { Chessboard } from 'react-chessboard';
 import SimplePeer from 'simple-peer';
 import './App.css';
 
+// WebRTC support check
+const isWebRTCSupported = () => {
+  return !!(window.RTCPeerConnection && window.RTCIceCandidate && window.RTCSessionDescription);
+};
+
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
   reconnection: true,
@@ -24,6 +29,15 @@ function App() {
   const [currentTurn, setCurrentTurn] = useState('white');
   const [error, setError] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
+  const [webRTCSupported, setWebRTCSupported] = useState(true);
+
+  // Check WebRTC support on mount
+  useEffect(() => {
+    if (!isWebRTCSupported()) {
+      setWebRTCSupported(false);
+      setError('WebRTC is not supported in this browser! Audio call will not work.');
+    }
+  }, []);
 
   // Socket Connection Handling
   useEffect(() => {
@@ -88,7 +102,7 @@ function App() {
 
   // WebRTC Logic (Only Audio)
   useEffect(() => {
-    if (!role || !isConnected || !socketConnected) return;
+    if (!role || !isConnected || !socketConnected || !webRTCSupported) return;
 
     let localStream;
     let peerInstance;
@@ -189,7 +203,7 @@ function App() {
       }
       socket.off('signal');
     };
-  }, [role, isConnected, socketConnected]);
+  }, [role, isConnected, socketConnected, webRTCSupported]);
 
   // Handle Chess Moves
   const onDrop = (sourceSquare, targetSquare) => {
@@ -221,6 +235,7 @@ function App() {
       <h1>CHESS WITH VOICE CALL, LADAI SHURU!</h1>
       {error && <p style={{ color: 'red' }}>{error}</p>}
       {!socketConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
+      {!webRTCSupported && <p style={{ color: 'red' }}>WebRTC not supported! Audio call unavailable.</p>}
       <div className="game-container">
         <Chessboard
           position={position}
