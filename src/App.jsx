@@ -7,6 +7,9 @@ import './App.css';
 
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionAttempts: 15,
+  reconnectionDelay: 1000,
 });
 
 function App() {
@@ -19,6 +22,32 @@ function App() {
   const [color, setColor] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [currentTurn, setCurrentTurn] = useState('white');
+  const [error, setError] = useState('');
+
+  // Socket Connection Status
+  useEffect(() => {
+    socket.on('connect', () => {
+      console.log('Socket connected:', socket.id);
+      setIsConnected(true);
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('Socket connect error:', err);
+      setError('Socket connection failed: ' + err.message);
+      setIsConnected(false);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Socket disconnected');
+      setIsConnected(false);
+    });
+
+    return () => {
+      socket.off('connect');
+      socket.off('connect_error');
+      socket.off('disconnect');
+    };
+  }, []);
 
   // Chess Logic
   useEffect(() => {
@@ -36,7 +65,6 @@ function App() {
 
     socket.on('start', ({ turn, fen }) => {
       console.log('Game started, turn:', turn);
-      setIsConnected(true);
       setCurrentTurn(turn);
       setPosition(fen);
       setGame(new Chess(fen));
@@ -49,7 +77,7 @@ function App() {
 
     socket.on('error', (err) => {
       console.error('Socket error:', err);
-      alert(err);
+      setError(err);
     });
 
     return () => {
@@ -70,15 +98,20 @@ function App() {
 
     const initPeer = async () => {
       try {
+        console.log('Requesting audio stream...');
         localStream = await navigator.mediaDevices.getUserMedia({
-          video: false, // Video hata diya
-          audio: true,   // Sirf audio rakha
+          video: false,
+          audio: true,
         });
 
         if (localAudioRef.current) {
           localAudioRef.current.srcObject = localStream;
           localAudioRef.current.muted = true;
-          await localAudioRef.current.play();
+          await localAudioRef.current.play().catch((e) => console.error('Local audio play error:', e));
+          console.log('Local audio stream set');
+        } else {
+          setError('Local audio element not found!');
+          return;
         }
 
         peerInstance = new SimplePeer({
@@ -88,7 +121,7 @@ function App() {
           config: {
             iceServers: [
               { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
+              { urls: 'stun:global.stun.twilio.com:3478' },
               {
                 urls: 'turn:numb.viagenie.ca',
                 username: 'webrtc@live.com',
@@ -104,36 +137,44 @@ function App() {
         });
 
         peerInstance.on('signal', (data) => {
-          console.log('SIGNAL:', data.type || 'candidate');
-          socket.emit('signal', data);
+          console.log('Sending signal:', data.type || 'candidate');
+          socket.emit('signal', { data, to: role === 'initiator' ? 'receiver' : 'initiator' });
         });
 
         peerInstance.on('stream', (remoteStream) => {
-          console.log('GOT REMOTE AUDIO STREAM');
+          console.log('Received remote audio stream');
           if (remoteAudioRef.current) {
             remoteAudioRef.current.srcObject = remoteStream;
-            remoteAudioRef.current.play().catch((e) => console.log('Audio play error:', e));
+            remoteAudioRef.current.play().catch((e) => console.error('Remote audio play error:', e));
+          } else {
+            setError('Remote audio element not found!');
           }
         });
 
         peerInstance.on('error', (err) => {
-          console.error('PEER ERROR:', err);
+          console.error('Peer error:', err);
+          setError('Peer error: ' + err.message);
         });
 
         peerInstance.on('connect', () => {
-          console.log('WEBRTC AUDIO CONNECTED!');
+          console.log('WebRTC audio connected!');
+        });
+
+        peerInstance.on('close', () => {
+          console.log('Peer connection closed');
         });
 
         peerRef.current = peerInstance;
 
-        socket.on('signal', (data) => {
-          console.log('RECEIVED SIGNAL:', data.type || 'candidate');
-          if (!peerInstance.destroyed) {
+        socket.on('signal', ({ data, from }) => {
+          console.log('Received signal from', from, ':', data.type || 'candidate');
+          if (peerInstance && !peerInstance.destroyed) {
             peerInstance.signal(data);
           }
         });
       } catch (err) {
         console.error('Media error:', err);
+        setError('Mic access denied or error: ' + err.message);
       }
     };
 
@@ -141,8 +182,9 @@ function App() {
 
     return () => {
       if (peerInstance) {
-        console.log('CLEANING UP PEER');
+        console.log('Cleaning up peer');
         peerInstance.destroy();
+        peerRef.current = null;
       }
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop());
@@ -179,6 +221,8 @@ function App() {
   return (
     <div className="App">
       <h1>CHESS WITH VOICE CALL, LADAI SHURU!</h1>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {!isConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
       <div className="game-container">
         <Chessboard
           position={position}
