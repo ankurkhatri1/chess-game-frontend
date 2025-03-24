@@ -12,8 +12,8 @@ const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
 function App() {
   const [game, setGame] = useState(new Chess());
   const [position, setPosition] = useState('start');
-  const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
+  const localAudioRef = useRef(null);
+  const remoteAudioRef = useRef(null);
   const peerRef = useRef(null);
   const [role, setRole] = useState(null);
   const [color, setColor] = useState(null);
@@ -23,7 +23,7 @@ function App() {
   // Chess Logic
   useEffect(() => {
     socket.on('move', ({ san, fen }) => {
-      const newGame = new Chess(fen); // Update local game state from server
+      const newGame = new Chess(fen);
       setGame(newGame);
       setPosition(fen);
     });
@@ -61,7 +61,7 @@ function App() {
     };
   }, []);
 
-  // WebRTC Logic
+  // WebRTC Logic (Only Audio)
   useEffect(() => {
     if (!role || !isConnected) return;
 
@@ -71,14 +71,14 @@ function App() {
     const initPeer = async () => {
       try {
         localStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
+          video: false, // Video hata diya
+          audio: true,   // Sirf audio rakha
         });
 
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStream;
-          localVideoRef.current.muted = true;
-          await localVideoRef.current.play();
+        if (localAudioRef.current) {
+          localAudioRef.current.srcObject = localStream;
+          localAudioRef.current.muted = true;
+          await localAudioRef.current.play();
         }
 
         peerInstance = new SimplePeer({
@@ -109,10 +109,10 @@ function App() {
         });
 
         peerInstance.on('stream', (remoteStream) => {
-          console.log('GOT REMOTE STREAM');
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStream;
-            remoteVideoRef.current.play().catch((e) => console.log('Video play error:', e));
+          console.log('GOT REMOTE AUDIO STREAM');
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = remoteStream;
+            remoteAudioRef.current.play().catch((e) => console.log('Audio play error:', e));
           }
         });
 
@@ -121,7 +121,7 @@ function App() {
         });
 
         peerInstance.on('connect', () => {
-          console.log('WEBRTC CONNECTED!');
+          console.log('WEBRTC AUDIO CONNECTED!');
         });
 
         peerRef.current = peerInstance;
@@ -158,7 +158,7 @@ function App() {
       return false;
     }
 
-    const newGame = new Chess(game.fen()); // Clone current game state
+    const newGame = new Chess(game.fen());
     const move = newGame.move({
       from: sourceSquare,
       to: targetSquare,
@@ -170,16 +170,15 @@ function App() {
       return false;
     }
 
-    // Locally update the board immediately
     setGame(newGame);
     setPosition(newGame.fen());
-    socket.emit('move', move.san); // Send move to server
+    socket.emit('move', move.san);
     return true;
   };
 
   return (
     <div className="App">
-      <h1>CHESS WITH VIDEO CALL, LADAI SHURU!</h1>
+      <h1>CHESS WITH VOICE CALL, LADAI SHURU!</h1>
       <div className="game-container">
         <Chessboard
           position={position}
@@ -190,14 +189,14 @@ function App() {
             boxShadow: '0 2px 10px rgba(0, 0, 0, 0.5)',
           }}
         />
-        <div className="video-container">
-          <div className="video-box">
-            <video ref={localVideoRef} autoPlay playsInline className="video-self" />
-            <div className="video-label">TU ({color || 'Wait'})</div>
+        <div className="audio-container">
+          <div className="audio-box">
+            <audio ref={localAudioRef} autoPlay playsInline />
+            <div className="audio-label">TU ({color || 'Wait'})</div>
           </div>
-          <div className="video-box">
-            <video ref={remoteVideoRef} autoPlay playsInline className="video-peer" />
-            <div className="video-label">DUSHMAN</div>
+          <div className="audio-box">
+            <audio ref={remoteAudioRef} autoPlay playsInline />
+            <div className="audio-label">DUSHMAN</div>
           </div>
         </div>
       </div>
