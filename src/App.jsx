@@ -2,7 +2,9 @@ import { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
-import Peer from 'peerjs';
+import SimplePeer from 'simple-peer';
+import { BrowserRouter as Router, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { v4 as uuidv4 } from 'uuid';
 import './App.css';
 
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
@@ -12,7 +14,11 @@ const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   reconnectionDelay: 1000,
 });
 
-function App() {
+const isWebRTCSupported = () => {
+  return !!(window.RTCPeerConnection && window.RTCIceCandidate && window.RTCSessionDescription);
+};
+
+function Game() {
   const [game, setGame] = useState(new Chess());
   const [position, setPosition] = useState('start');
   const localAudioRef = useRef(null);
@@ -24,12 +30,24 @@ function App() {
   const [currentTurn, setCurrentTurn] = useState('white');
   const [error, setError] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
+  const [webRTCSupported, setWebRTCSupported] = useState(true);
+  const { challengeId } = useParams(); // Extract challenge ID from URL
+  const navigate = useNavigate();
 
-  // Socket Connection Handling
+  useEffect(() => {
+    if (!isWebRTCSupported()) {
+      setWebRTCSupported(false);
+      setError('WebRTC is not supported in this browser! Audio call will not work.');
+    }
+  }, []);
+
   useEffect(() => {
     socket.on('connect', () => {
       console.log('Socket connected:', socket.id);
       setSocketConnected(true);
+      if (challengeId) {
+        socket.emit('join-challenge', challengeId);
+      }
     });
 
     socket.on('connect_error', (err) => {
@@ -50,8 +68,8 @@ function App() {
       setPosition(fen);
     });
 
-    socket.on('role', ({ role, color, peerId }) => {
-      console.log(`Assigned role: ${role}, color: ${color}, peerId: ${peerId}`);
+    socket.on('role', ({ role, color }) => {
+      console.log(`Assigned role: ${role}, color: ${color}`);
       setRole(role);
       setColor(color);
     });
@@ -84,18 +102,17 @@ function App() {
       socket.off('turn');
       socket.off('error');
     };
-  }, []);
+  }, [challengeId]);
 
-  // WebRTC Logic with PeerJS
   useEffect(() => {
-    if (!role || !isConnected || !socketConnected) return;
+    if (!role || !isConnected || !socketConnected || !webRTCSupported) return;
 
     let localStream;
     let peerInstance;
 
     const initPeer = async () => {
       try {
-        console.log('Initializing PeerJS...');
+        console.log('Initializing WebRTC peer...');
         localStream = await navigator.mediaDevices.getUserMedia({
           video: false,
           audio: true,
@@ -112,9 +129,10 @@ function App() {
           return;
         }
 
-        peerInstance = new Peer({
+        peerInstance = new SimplePeer({
           initiator: role === 'initiator',
           trickle: true,
+          stream: localStream,
           config: {
             iceServers: [
               { urls: 'stun:stun.l.google.com:19302' },
@@ -133,41 +151,24 @@ function App() {
           },
         });
 
-        peerRef.current = peerInstance;
-
-        peerInstance.on('open', (id) => {
-          console.log('PeerJS ID:', id);
-          socket.emit('peer-id', { peerId: id, role });
+        peerInstance.on('signal', (data) => {
+          console.log('Sending signal:', data.type || 'candidate');
+          socket.emit('signal', { data, to: role === 'initiator' ? 'receiver' : 'initiator', challengeId });
         });
 
-        peerInstance.on('call', (call) => {
-          console.log('Receiving call...');
-          call.answer(localStream);
-          call.on('stream', (remoteStream) => {
-            console.log('Received remote audio stream');
-            if (remoteAudioRef.current) {
-              remoteAudioRef.current.srcObject = remoteStream;
-              remoteAudioRef.current.play().catch((e) => console.error('Remote audio play error:', e));
-            }
-          });
-        });
-
-        socket.on('peer-id', ({ peerId, role: remoteRole }) => {
-          if (role === 'initiator' && remoteRole === 'receiver') {
-            console.log('Calling receiver with Peer ID:', peerId);
-            const call = peerInstance.call(peerId, localStream);
-            call.on('stream', (remoteStream) => {
-              console.log('Received remote audio stream from receiver');
-              if (remoteAudioRef.current) {
-                remoteAudioRef.current.srcObject = remoteStream;
-                remoteAudioRef.current.play().catch((e) => console.error('Remote audio play error:', e));
-              }
-            });
-            call.on('error', (err) => {
-              console.error('Call error:', err);
-              setError('Call error: ' + err.message);
-            });
+        peerInstance.on('stream', (remoteStream) => {
+          console.log('Received remote audio stream');
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = remoteStream;
+            remoteAudioRef.current.play().catch((e) => console.error('Remote audio play error:', e));
+          } else {
+            setError('Remote audio element not found!');
+            console.error('Remote audio ref is null');
           }
+        });
+
+        peerInstance.on('connect', () => {
+          console.log('WebRTC peer connected!');
         });
 
         peerInstance.on('error', (err) => {
@@ -178,6 +179,15 @@ function App() {
         peerInstance.on('close', () => {
           console.log('Peer connection closed');
         });
+
+        peerRef.current = peerInstance;
+
+        socket.on('signal', ({ data, from }) => {
+          console.log('Received signal from', from, ':', data.type || 'candidate');
+          if (peerInstance && !peerInstance.destroyed) {
+            peerInstance.signal(data);
+          }
+        });
       } catch (err) {
         console.error('Media error:', err);
         setError('Mic access denied or error: ' + err.message);
@@ -187,18 +197,17 @@ function App() {
     initPeer();
 
     return () => {
-      console.log('Cleaning up PeerJS...');
+      console.log('Cleaning up WebRTC...');
       if (peerInstance) {
         peerInstance.destroy();
       }
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop());
       }
-      socket.off('peer-id');
+      socket.off('signal');
     };
-  }, [role, isConnected, socketConnected]);
+  }, [role, isConnected, socketConnected, webRTCSupported, challengeId]);
 
-  // Handle Chess Moves
   const onDrop = (sourceSquare, targetSquare) => {
     if (color !== currentTurn) {
       alert('TERI BAARI NAHI HAI, BHAI! DUSHMAN KA WAIT KAR!');
@@ -219,7 +228,7 @@ function App() {
 
     setGame(newGame);
     setPosition(newGame.fen());
-    socket.emit('move', move.san);
+    socket.emit('move', { san: move.san, challengeId });
     return true;
   };
 
@@ -228,6 +237,7 @@ function App() {
       <h1>CHESS WITH VOICE CALL, LADAI SHURU!</h1>
       {error && <p style={{ color: 'red' }}>{error}</p>}
       {!socketConnected && <p style={{ color: 'red' }}>Connecting to server...</p>}
+      {!webRTCSupported && <p style={{ color: 'red' }}>WebRTC not supported! Audio call unavailable.</p>}
       <div className="game-container">
         <Chessboard
           position={position}
@@ -253,7 +263,49 @@ function App() {
         {role && `TU ${role.toUpperCase()} HAI, COLOR: ${color?.toUpperCase()}`} <br />
         {isConnected ? `CONNECTED! AB ${currentTurn.toUpperCase()} KI BAARI!` : 'DUSHMAN KA WAIT KAR...'}
       </div>
+      <button onClick={() => navigate('/')} style={{ marginTop: '20px' }}>
+        Back to Home
+      </button>
     </div>
+  );
+}
+
+function Home() {
+  const navigate = useNavigate();
+  const [challengeLink, setChallengeLink] = useState('');
+
+  const createChallenge = () => {
+    const challengeId = uuidv4();
+    socket.emit('create-challenge', challengeId);
+    const link = `${window.location.origin}/challenge/${challengeId}`;
+    setChallengeLink(link);
+    navigate(`/challenge/${challengeId}`);
+  };
+
+  return (
+    <div className="App">
+      <h1>CHESS WITH VOICE CALL</h1>
+      <button onClick={createChallenge} style={{ padding: '10px 20px', fontSize: '16px' }}>
+        Create Challenge
+      </button>
+      {challengeLink && (
+        <div style={{ marginTop: '20px' }}>
+          <p>Challenge Link: <a href={challengeLink}>{challengeLink}</a></p>
+          <p>Share this link with your opponent!</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/challenge/:challengeId" element={<Game />} />
+      </Routes>
+    </Router>
   );
 }
 
