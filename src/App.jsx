@@ -11,7 +11,7 @@ import './App.css';
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000', {
   transports: ['websocket', 'polling'],
   reconnection: true,
-  reconnectionAttempts: 20, // Increased attempts
+  reconnectionAttempts: 20, 
   reconnectionDelay: 2000, // Increased delay for Render wake-up
   path: '/socket.io',
   withCredentials: true,
